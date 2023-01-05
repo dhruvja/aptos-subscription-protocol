@@ -3,7 +3,7 @@ name = 'subscription'
 version = '1.0.0'
 
 [addresses]
-Subscription = "0x76f69f7312c60ae8d1032455fa1d6c6ff9b19e9eba51514822bcab6d297d7a1b"
+Subscription = "0x6234710dfe797ec0d6196b1c6a46af2eddb82e94a9258e05e0447c502b9ac441"
 
 [dependencies]
 AptosFramework = { git = "https://github.com/aptos-labs/aptos-core.git", subdir = "aptos-move/framework/aptos-framework/", rev="devnet"}

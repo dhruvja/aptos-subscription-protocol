@@ -1,0 +1,9 @@
+[package]
+name = 'subscription'
+version = '1.0.0'
+
+[addresses]
+Subscription = "0x76f69f7312c60ae8d1032455fa1d6c6ff9b19e9eba51514822bcab6d297d7a1b"
+
+[dependencies]
+AptosFramework = { git = "https://github.com/aptos-labs/aptos-core.git", subdir = "aptos-move/framework/aptos-framework/", rev="devnet"}

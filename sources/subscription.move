@@ -13,6 +13,8 @@ module Subscription::subscription {
     const ETIME_INTERVAL_NOT_ELAPSED: u64 = 4;
     const EINVALID_MERCHANT_AUTHORITY: u64 = 5;
     const ELOW_DELEGATED_AMOUNT: u64 = 6;
+    const ESUBSCRIPTION_IS_INACTIVE: u64 = 7;
+    const EALREADY_ACTIVE: u64 = 8;
 
     struct MerchantAuthority has key {
         init_authority: address,
@@ -38,6 +40,7 @@ module Subscription::subscription {
         pending_delegated_amount: u64,
         resource_signer_cap: account::SignerCapability,
         last_payment_collection_time: u64 // timestamp in seconds
+        active: bool
     }
 
     public entry fun initialize_merchant_authority(merchant: &signer) {
@@ -94,7 +97,8 @@ module Subscription::subscription {
             payments_collected: 0,
             pending_delegated_amount: amount_delegated,
             resource_signer_cap: delegated_resource_cap,
-            last_payment_collection_time: 0
+            last_payment_collection_time: 0,
+            active: true
         };
         move_to<PaymentMetadata<CoinType>>(subscriber, payment_metadata);
     }
@@ -104,6 +108,7 @@ module Subscription::subscription {
         let payment_config = borrow_global<PaymentConfig<CoinType>>(merchant_addr);
         let payment_metadata = borrow_global_mut<PaymentMetadata<CoinType>>(customer);
         assert!(payment_metadata.payment_config == merchant_addr, EINVALID_MERCHANT_AUTHORITY);
+        assert!(payment_metadata.active, ESUBSCRIPTION_IS_INACTIVE);
 
         let current_time = timestamp::now_seconds();
         assert!(current_time > (payment_metadata.last_payment_collection_time + payment_config.time_interval), ETIME_INTERVAL_NOT_ELAPSED);
@@ -119,5 +124,45 @@ module Subscription::subscription {
         // Subtract the amount debited from pending delegated amount
         payment_metadata.pending_delegated_amount = payment_metadata.pending_delegated_amount - payment_metadata.amount_to_collect_per_period;
         payment_metadata.last_payment_collection_time = timestamp::now_seconds();
+        payment_metadata.payments_collected = payment_metadata.payments_collected + payment_metadata.amount_to_collect_per_period;
     }
+
+    public entry fun revoke_subscription<CoinType>(subscriber: &signer, merchant: address) acquires PaymentConfig, PaymentMetadata {
+        let subscriber_addr = signer::address_of(merchant);
+        let payment_config = borrow_global<PaymentConfig<CoinType>>(merchant);
+        let payment_metadata = borrow_global_mut<PaymentMetadata<CoinType>>(subscriber_addr);
+        assert!(payment_metadata.payment_config == merchant, EINVALID_MERCHANT_AUTHORITY); 
+
+        // fetching the resource account from capability
+        let delegated_address = account::get_signer_capability_address(&payment_metadata.resource_signer_cap);
+
+        // Revoking the signer capability
+        account::revoke_signer_capability(subscriber, delegated_address);
+
+        // making the status as inactive
+        payment_metadata.active = false;
+
+        // making delegated amount is total delegated amount - pending delegated amount since the rest would be 0
+        payment_metadata.amount_delegated = payment_metadata.amount_delegated - payment_metadata.pending_delegated_amount;
+
+        // making pending delegated amount as 0
+        payment_metadata.pending_delegated_amount = 0;
+    }
+
+    public entry fun activate_subscription<CoinType>(subscriber: &signer, merchant: address, cycles: u64, signer_capability_sig_bytes: vector<u8>, account_public_key_bytes: vector<u8>) acquires PaymentConfig, PaymentMetadata {
+        let subscriber_addr = signer::address_of(merchant);
+        let payment_config = borrow_global<PaymentConfig<CoinType>>(merchant);
+        let payment_metadata = borrow_global_mut<PaymentMetadata<CoinType>>(subscriber_addr);
+        assert!(payment_metadata.payment_config == merchant, EINVALID_MERCHANT_AUTHORITY); 
+        assert!(!payment_metadata.active, EALREADY_ACTIVE);
+        // offer signer capability to the resource account and activate subscription
+        let delegated_address = account::get_signer_capability_address(&payment_metadata.resource_signer_cap); 
+        account::offer_signer_capability(subscriber, signer_capability_sig_bytes, 0, account_public_key_bytes, delegated_address);
+        payment_metadata.active = true;
+
+        let amount_delegated = cycles * payment_config.amount_to_collect_per_period;
+        payment_metadata.amount_delegated = payment_metadata.amount_delegated + amount_delegated;
+
+    }
+
 }

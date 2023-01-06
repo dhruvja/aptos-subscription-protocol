@@ -12,4 +12,5 @@ The features of the protocol are as follows
 - Can able to collect payments in regular interval of time
 - Subscriber can grant the program to delegate some part of the account towards the merchant
 - Subscriber can revoke the signer capability anytime.
+- Subscriber can activate the subscription without losing the previous subscription data
 - Merchant can change the authority with the current authority's signature.

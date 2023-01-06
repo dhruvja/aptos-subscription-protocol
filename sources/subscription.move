@@ -10,6 +10,9 @@ module Subscription::subscription {
     const EMERCHANT_AUTHORITY_NOT_CREATED: u64 = 1;
     const EPAYMENT_CONFIG_ALREADY_CREATED: u64 = 2;
     const EPAYMENT_CONFIG_NOT_CREATED: u64 = 3;
+    const ETIME_INTERVAL_NOT_ELAPSED: u64 = 4;
+    const EINVALID_MERCHANT_AUTHORITY: u64 = 5;
+    const ELOW_DELEGATED_AMOUNT: u64 = 6;
 
     struct MerchantAuthority has key {
         init_authority: address,
@@ -21,19 +24,20 @@ module Subscription::subscription {
         merchant_authority: address,
         collect_on_init: bool,
         amount_to_collect_on_init: u64,
-        amount_to_collect_per_period: u64,
+        amount_to_collect_per_period: u64, // in seconds
         time_interval: u64,
         subscription_name: vector<u8>,
     }
 
     struct PaymentMetadata<phantom CoinType> has key {
         owner: address,
-        created_at: u64,
+        created_at: u64, // timestamp in seconds
         payment_config: address,
         amount_delegated: u64,
         payments_collected: u64,
         pending_delegated_amount: u64,
-        resource_signer_cap: account::SignerCapability
+        resource_signer_cap: account::SignerCapability,
+        last_payment_collection_time: u64 // timestamp in seconds
     }
 
     public entry fun initialize_merchant_authority(merchant: &signer) {
@@ -70,7 +74,7 @@ module Subscription::subscription {
 
         let payment_config = borrow_global<PaymentConfig<CoinType>>(merchant_addr);
 
-        let current_time = timestamp::now_microseconds();
+        let current_time = timestamp::now_seconds();
         let amount_delegated = cycles * payment_config.amount_to_collect_per_period;
 
         // delegating the account to a resource account
@@ -89,8 +93,31 @@ module Subscription::subscription {
             amount_delegated,
             payments_collected: 0,
             pending_delegated_amount: amount_delegated,
-            resource_signer_cap: delegated_resource_cap
+            resource_signer_cap: delegated_resource_cap,
+            last_payment_collection_time: 0
         };
         move_to<PaymentMetadata<CoinType>>(subscriber, payment_metadata);
+    }
+
+    public entry fun collect_payment<CoinType>(merchant: &signer, customer: address) acquires PaymentConfig, PaymentMetadata {
+        let merchant_addr = signer::address_of(merchant);
+        let payment_config = borrow_global<PaymentConfig<CoinType>>(merchant_addr);
+        let payment_metadata = borrow_global_mut<PaymentMetadata<CoinType>>(customer);
+        assert!(payment_metadata.payment_config == merchant_addr, EINVALID_MERCHANT_AUTHORITY);
+
+        let current_time = timestamp::now_seconds();
+        assert!(current_time > (payment_metadata.last_payment_collection_time + payment_config.time_interval), ETIME_INTERVAL_NOT_ELAPSED);
+        assert!(payment_metadata.pending_delegated_amount > payment_metadata.amount_to_collect_period, ELOW_DELEGATED_AMOUNT);
+
+        // derive the resource address using the capability
+        let delegated_account = account::create_signer_with_capability(&payment_metadata.resource_signer_cap);
+        let delegated_signer = account::create_authorized_signer(&delegated_account, customer);
+
+        // Transfer the amount to merchant account
+        coin::transfer<CoinType>(&delegated_signer, payment_config.payment_account, payment_metadata.amount_to_collect_period);
+
+        // Subtract the amount debited from pending delegated amount
+        payment_metadata.pending_delegated_amount = payment_metadata.pending_delegated_amount - payment_metadata.amount_to_collect_per_period;
+        payment_metadata.last_payment_collection_time = timestamp::now_seconds();
     }
 }

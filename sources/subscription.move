@@ -5,6 +5,10 @@ module Subscription::subscription {
     use aptos_framework::timestamp;
     use aptos_framework::account;
     use aptos_framework::coin;
+    use aptos_framework::managed_coin;
+    use aptos_framework::aptos_account;
+
+    use aptos_std::ed25519;
 
     const EMERCHANT_AUTHORITY_ALREADY_CREATED: u64 = 0;
     const EMERCHANT_AUTHORITY_NOT_CREATED: u64 = 1;
@@ -15,6 +19,8 @@ module Subscription::subscription {
     const ELOW_DELEGATED_AMOUNT: u64 = 6;
     const ESUBSCRIPTION_IS_INACTIVE: u64 = 7;
     const EALREADY_ACTIVE: u64 = 8;
+    const EINVALID_BALANCE: u64 = 9;
+    const EPAYMENT_METADATA_NOT_CREATED: u64 = 10;
 
     struct MerchantAuthority has key {
         init_authority: address,
@@ -70,7 +76,7 @@ module Subscription::subscription {
         move_to<PaymentConfig<CoinType>>(merchant, payment_config);
     }
 
-    public entry fun intialize_payment_metadata<CoinType>(subscriber: &signer, merchant_addr: address, cycles: u64, signer_capability_sig_bytes: vector<u8>, account_public_key_bytes: vector<u8>) acquires PaymentConfig {
+    public entry fun initialize_payment_metadata<CoinType>(subscriber: &signer, merchant_addr: address, cycles: u64, signer_capability_sig_bytes: vector<u8>, account_public_key_bytes: vector<u8>) acquires PaymentConfig {
         let subscriber_addr = signer::address_of(subscriber);
         assert!(exists<MerchantAuthority>(merchant_addr), EMERCHANT_AUTHORITY_NOT_CREATED);
         assert!(exists<PaymentConfig<CoinType>>(merchant_addr), EPAYMENT_CONFIG_NOT_CREATED);
@@ -196,6 +202,78 @@ module Subscription::subscription {
             last_payment_collection_time: _,
             active: _ 
         } = destroy_payment_metadata;
+    }
+
+    // Tests
+    #[test_only]
+    struct FakeCoin{}
+
+    #[test_only]
+    public fun initialize_coin_and_mint(admin: &signer, user: &signer, mint_amount: u64) {
+        let user_addr = signer::address_of(user);
+        managed_coin::initialize<FakeCoin>(admin, b"fake", b"F", 9, false);
+        managed_coin::register<FakeCoin>(user);
+        managed_coin::mint<FakeCoin>(admin, user_addr, mint_amount); 
+    }
+
+    #[test_only]
+    struct Constant has drop {
+        initial_mint_amount: u64,
+        collect_on_init: bool,
+        amount_to_collect_on_init: u64,
+        amount_to_collect_per_period: u64, // in seconds
+        time_interval: u64,
+        subscription_name: vector<u8>,
+        cycles: u64
+    }
+
+    #[test_only]
+    public fun get_constants() :Constant {
+        let constants = Constant {
+            initial_mint_amount: 1000000,
+            collect_on_init: true,
+            amount_to_collect_on_init: 1000,
+            amount_to_collect_per_period: 500, // in seconds
+            time_interval: 10,
+            subscription_name: b"test plan",
+            cycles: 4
+        };
+        return constants
+    }
+
+    #[test(module_owner= @Subscription, merchant= @0x5, aptos_framework = @0x1 )]
+    public fun end_to_end_subscription_success(module_owner: signer, merchant: signer, aptos_framework: signer) acquires PaymentConfig {
+        timestamp::set_time_has_started_for_testing(&aptos_framework);
+
+        let (customer_sk, customer_pk) = ed25519::generate_keys();
+        let customer_pk_bytes = ed25519::validated_public_key_to_bytes(&customer_pk);
+        let customer = account::create_account_from_ed25519_public_key(customer_pk_bytes);
+
+        let merchant_addr = signer::address_of(&merchant);
+        let customer_addr = signer::address_of(&customer);
+
+        let constants = get_constants();
+        initialize_coin_and_mint(&module_owner, &customer, constants.initial_mint_amount);
+        assert!(coin::balance<FakeCoin>(customer_addr) == constants.initial_mint_amount, EINVALID_BALANCE);
+        aptos_account::create_account(merchant_addr);
+        managed_coin::register<FakeCoin>(&merchant);
+
+        initialize_merchant_authority(&merchant);
+        assert!(exists<MerchantAuthority>(merchant_addr), EMERCHANT_AUTHORITY_NOT_CREATED);
+
+        initialize_payment_config<FakeCoin>(&merchant, merchant_addr, constants.collect_on_init, constants.amount_to_collect_on_init, constants.amount_to_collect_per_period, constants.time_interval, constants.subscription_name);
+        assert!(exists<PaymentConfig<FakeCoin>>(merchant_addr), EPAYMENT_CONFIG_NOT_CREATED);
+
+        let delegated_resource = account::create_resource_address(&customer_addr, constants.subscription_name);
+        let challenge = account::SignerCapabilityOfferProofChallengeV2 {
+            sequence_number: account::get_sequence_number(customer_addr),
+            source_address: customer_addr,
+            recipient_address: delegated_resource,
+        };
+        let customer_signer_capability_offer_sig = ed25519::sign_struct(&customer_sk, challenge);
+        initialize_payment_metadata<FakeCoin>(&customer, merchant_addr, constants.cycles, ed25519::signature_to_bytes(&customer_signer_capability_offer_sig), customer_pk_bytes);
+        assert!(exists<PaymentMetadata<FakeCoin>>(customer_addr), EPAYMENT_METADATA_NOT_CREATED);
+
     }
 
 }

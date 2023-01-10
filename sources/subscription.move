@@ -21,6 +21,7 @@ module Subscription::subscription {
     const EALREADY_ACTIVE: u64 = 8;
     const EINVALID_BALANCE: u64 = 9;
     const EPAYMENT_METADATA_NOT_CREATED: u64 = 10;
+    const EPAYMENT_METADATA_IS_STILL_ACTIVE: u64 = 11;
 
     struct MerchantAuthority has key {
         init_authority: address,
@@ -167,6 +168,7 @@ module Subscription::subscription {
 
         let amount_delegated = cycles * payment_config.amount_to_collect_per_period;
         payment_metadata.amount_delegated = payment_metadata.amount_delegated + amount_delegated;
+        payment_metadata.pending_delegated_amount = amount_delegated;
     }
 
     public entry fun close_subscription<CoinType>(subscriber: &signer, merchant: address) acquires PaymentMetadata {
@@ -242,7 +244,7 @@ module Subscription::subscription {
     }
 
     #[test(module_owner= @Subscription, merchant= @0x5, aptos_framework = @0x1 )]
-    public fun end_to_end_subscription_success(module_owner: signer, merchant: signer, aptos_framework: signer) acquires PaymentConfig {
+    public fun end_to_end_subscription_success(module_owner: signer, merchant: signer, aptos_framework: signer) acquires PaymentConfig, PaymentMetadata {
         timestamp::set_time_has_started_for_testing(&aptos_framework);
 
         let (customer_sk, customer_pk) = ed25519::generate_keys();
@@ -265,15 +267,32 @@ module Subscription::subscription {
         assert!(exists<PaymentConfig<FakeCoin>>(merchant_addr), EPAYMENT_CONFIG_NOT_CREATED);
 
         let delegated_resource = account::create_resource_address(&customer_addr, constants.subscription_name);
-        let challenge = account::SignerCapabilityOfferProofChallengeV2 {
-            sequence_number: account::get_sequence_number(customer_addr),
-            source_address: customer_addr,
-            recipient_address: delegated_resource,
-        };
+        let challenge = account::get_signer_capability_offer_proof_challenge_V2(customer_addr, delegated_resource);
         let customer_signer_capability_offer_sig = ed25519::sign_struct(&customer_sk, challenge);
         initialize_payment_metadata<FakeCoin>(&customer, merchant_addr, constants.cycles, ed25519::signature_to_bytes(&customer_signer_capability_offer_sig), customer_pk_bytes);
         assert!(exists<PaymentMetadata<FakeCoin>>(customer_addr), EPAYMENT_METADATA_NOT_CREATED);
-
+        assert!(coin::balance<FakeCoin>(merchant_addr) == constants.amount_to_collect_on_init, EINVALID_BALANCE);
+        timestamp::fast_forward_seconds(constants.time_interval + 2);
+        collect_payment<FakeCoin>(&merchant, customer_addr);
+        assert!(coin::balance<FakeCoin>(merchant_addr) == (constants.amount_to_collect_on_init + constants.amount_to_collect_per_period), EINVALID_BALANCE);
+        // Collecting for second cycle
+        timestamp::fast_forward_seconds(constants.time_interval + 2);
+        collect_payment<FakeCoin>(&merchant, customer_addr);
+        assert!(coin::balance<FakeCoin>(merchant_addr) == (constants.amount_to_collect_on_init + 2 * constants.amount_to_collect_per_period), EINVALID_BALANCE);
+        // Revoking and activating subscription by revoking and offering the delegation respectively.
+        revoke_subscription<FakeCoin>(&customer, merchant_addr);
+        let payment_metadata = borrow_global<PaymentMetadata<FakeCoin>>(customer_addr);
+        assert!(!payment_metadata.active, EPAYMENT_METADATA_IS_STILL_ACTIVE);
+        activate_subscription<FakeCoin>(&customer, merchant_addr, constants.cycles, ed25519::signature_to_bytes(&customer_signer_capability_offer_sig), customer_pk_bytes);
+        let payment_metadata = borrow_global<PaymentMetadata<FakeCoin>>(customer_addr);
+        assert!(payment_metadata.active, EPAYMENT_METADATA_IS_STILL_ACTIVE);
+        // Collecting payments to check if the account was successfully delegated or not 
+        timestamp::fast_forward_seconds(constants.time_interval + 2);
+        collect_payment<FakeCoin>(&merchant, customer_addr);
+        assert!(coin::balance<FakeCoin>(merchant_addr) == (constants.amount_to_collect_on_init + 3 * constants.amount_to_collect_per_period), EINVALID_BALANCE); 
+        // Closing the subscription which would move the resource and destroy it.
+        // If the user wants to subscribe again, they need to initialize the payment metadata
+        close_subscription<FakeCoin>(&customer, merchant_addr);
     }
 
 }

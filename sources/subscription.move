@@ -135,7 +135,7 @@ module Subscription::subscription {
         payment_metadata.payments_collected = payment_metadata.payments_collected + payment_config.amount_to_collect_per_period;
     }
 
-    public entry fun recharge_subscription(subscriber: &signer, merchant: address, cycles: u64) acquires PaymentConfig, PaymentMetadata {
+    public entry fun recharge_subscription<CoinType>(subscriber: &signer, merchant: address, cycles: u64) acquires PaymentConfig, PaymentMetadata {
         let subscriber_addr = signer::address_of(subscriber);
         let payment_config = borrow_global<PaymentConfig<CoinType>>(merchant);
         let payment_metadata = borrow_global_mut<PaymentMetadata<CoinType>>(subscriber_addr);
@@ -255,19 +255,31 @@ module Subscription::subscription {
         };
         return constants
     }
+    
+    #[test_only]
+    fun create_account_and_sign_challenge(subscription_name: vector<u8>) :(vector<u8>, signer, vector<u8>, address) {
+        let (customer_sk, customer_pk) = ed25519::generate_keys();
+        let customer_pk_bytes = ed25519::validated_public_key_to_bytes(&customer_pk);
+        let customer = account::create_account_from_ed25519_public_key(customer_pk_bytes);
+        let customer_addr = signer::address_of(&customer); 
+        let resource_addr = account::create_resource_address(&customer_addr, subscription_name);
+
+        let challenge = account::get_signer_capability_offer_proof_challenge_V2(customer_addr, resource_addr);
+        let customer_signer_capability_offer_sig = ed25519::sign_struct(&customer_sk, challenge);
+        let customer_signer_capability_offer_bytes = ed25519::signature_to_bytes(&customer_signer_capability_offer_sig); 
+        (customer_pk_bytes, customer, customer_signer_capability_offer_bytes, resource_addr)
+    }
 
     #[test(module_owner= @Subscription, merchant= @0x5, aptos_framework = @0x1 )]
     public fun end_to_end_subscription_success(module_owner: signer, merchant: signer, aptos_framework: signer) acquires PaymentConfig, PaymentMetadata {
         timestamp::set_time_has_started_for_testing(&aptos_framework);
 
-        let (customer_sk, customer_pk) = ed25519::generate_keys();
-        let customer_pk_bytes = ed25519::validated_public_key_to_bytes(&customer_pk);
-        let customer = account::create_account_from_ed25519_public_key(customer_pk_bytes);
+        let constants = get_constants();
+        let (customer_pk_bytes, customer, customer_signer_capability_offer_bytes, _delegated_resource) = create_account_and_sign_challenge(constants.subscription_name);
 
         let merchant_addr = signer::address_of(&merchant);
         let customer_addr = signer::address_of(&customer);
-
-        let constants = get_constants();
+        
         initialize_coin_and_mint(&module_owner, &customer, constants.initial_mint_amount);
         assert!(coin::balance<FakeCoin>(customer_addr) == constants.initial_mint_amount, EINVALID_BALANCE);
         aptos_account::create_account(merchant_addr);
@@ -279,10 +291,7 @@ module Subscription::subscription {
         initialize_payment_config<FakeCoin>(&merchant, merchant_addr, constants.collect_on_init, constants.amount_to_collect_on_init, constants.amount_to_collect_per_period, constants.time_interval, constants.subscription_name);
         assert!(exists<PaymentConfig<FakeCoin>>(merchant_addr), EPAYMENT_CONFIG_NOT_CREATED);
 
-        let delegated_resource = account::create_resource_address(&customer_addr, constants.subscription_name);
-        let challenge = account::get_signer_capability_offer_proof_challenge_V2(customer_addr, delegated_resource);
-        let customer_signer_capability_offer_sig = ed25519::sign_struct(&customer_sk, challenge);
-        initialize_payment_metadata<FakeCoin>(&customer, merchant_addr, constants.cycles, ed25519::signature_to_bytes(&customer_signer_capability_offer_sig), customer_pk_bytes);
+        initialize_payment_metadata<FakeCoin>(&customer, merchant_addr, constants.cycles, customer_signer_capability_offer_bytes, customer_pk_bytes);
         assert!(exists<PaymentMetadata<FakeCoin>>(customer_addr), EPAYMENT_METADATA_NOT_CREATED);
         assert!(coin::balance<FakeCoin>(merchant_addr) == constants.amount_to_collect_on_init, EINVALID_BALANCE);
         timestamp::fast_forward_seconds(constants.time_interval + 2);
@@ -296,7 +305,7 @@ module Subscription::subscription {
         revoke_subscription<FakeCoin>(&customer, merchant_addr);
         let payment_metadata = borrow_global<PaymentMetadata<FakeCoin>>(customer_addr);
         assert!(!payment_metadata.active, EPAYMENT_METADATA_IS_STILL_ACTIVE);
-        activate_subscription<FakeCoin>(&customer, merchant_addr, constants.cycles, ed25519::signature_to_bytes(&customer_signer_capability_offer_sig), customer_pk_bytes);
+        activate_subscription<FakeCoin>(&customer, merchant_addr, constants.cycles, customer_signer_capability_offer_bytes , customer_pk_bytes);
         let payment_metadata = borrow_global<PaymentMetadata<FakeCoin>>(customer_addr);
         assert!(payment_metadata.active, EPAYMENT_METADATA_IS_STILL_ACTIVE);
         // Collecting payments to check if the account was successfully delegated or not 
@@ -306,6 +315,122 @@ module Subscription::subscription {
         // Closing the subscription which would move the resource and destroy it.
         // If the user wants to subscribe again, they need to initialize the payment metadata
         close_subscription<FakeCoin>(&customer, merchant_addr);
+    }   
+
+    #[test(module_owner= @Subscription, merchant= @0x5, aptos_framework = @0x1 )]
+    #[expected_failure(abort_code = ESUBSCRIPTION_IS_INACTIVE)]
+    public entry fun cannot_collect_payment_after_revoking(module_owner: signer, merchant: signer, aptos_framework: signer) acquires PaymentConfig, PaymentMetadata {
+        timestamp::set_time_has_started_for_testing(&aptos_framework);
+
+        let constants = get_constants();
+        let (customer_pk_bytes, customer, customer_signer_capability_offer_bytes, _delegated_resource) = create_account_and_sign_challenge(constants.subscription_name);
+
+        let merchant_addr = signer::address_of(&merchant);
+        let customer_addr = signer::address_of(&customer);
+        
+        initialize_coin_and_mint(&module_owner, &customer, constants.initial_mint_amount);
+        assert!(coin::balance<FakeCoin>(customer_addr) == constants.initial_mint_amount, EINVALID_BALANCE);
+        aptos_account::create_account(merchant_addr);
+        managed_coin::register<FakeCoin>(&merchant);
+
+        initialize_merchant_authority(&merchant);
+        assert!(exists<MerchantAuthority>(merchant_addr), EMERCHANT_AUTHORITY_NOT_CREATED);
+
+        initialize_payment_config<FakeCoin>(&merchant, merchant_addr, constants.collect_on_init, constants.amount_to_collect_on_init, constants.amount_to_collect_per_period, constants.time_interval, constants.subscription_name);
+        assert!(exists<PaymentConfig<FakeCoin>>(merchant_addr), EPAYMENT_CONFIG_NOT_CREATED);
+
+        initialize_payment_metadata<FakeCoin>(&customer, merchant_addr, constants.cycles, customer_signer_capability_offer_bytes, customer_pk_bytes);
+        assert!(exists<PaymentMetadata<FakeCoin>>(customer_addr), EPAYMENT_METADATA_NOT_CREATED);
+        assert!(coin::balance<FakeCoin>(merchant_addr) == constants.amount_to_collect_on_init, EINVALID_BALANCE);
+        timestamp::fast_forward_seconds(constants.time_interval + 2);
+        collect_payment<FakeCoin>(&merchant, customer_addr);
+        assert!(coin::balance<FakeCoin>(merchant_addr) == (constants.amount_to_collect_on_init + constants.amount_to_collect_per_period), EINVALID_BALANCE);
+        // Collecting for second cycle
+        timestamp::fast_forward_seconds(constants.time_interval + 2);
+        collect_payment<FakeCoin>(&merchant, customer_addr);
+        assert!(coin::balance<FakeCoin>(merchant_addr) == (constants.amount_to_collect_on_init + 2 * constants.amount_to_collect_per_period), EINVALID_BALANCE);
+        // Revoking and activating subscription by revoking and offering the delegation respectively.
+        revoke_subscription<FakeCoin>(&customer, merchant_addr);
+        let payment_metadata = borrow_global<PaymentMetadata<FakeCoin>>(customer_addr);
+        assert!(!payment_metadata.active, EPAYMENT_METADATA_IS_STILL_ACTIVE);
+        // Since the signer capability has been revoked, collecting payments now would result in abort
+        timestamp::fast_forward_seconds(constants.time_interval + 2);
+        collect_payment<FakeCoin>(&merchant, customer_addr)
     }
+
+    #[test(module_owner= @Subscription, merchant= @0x5, aptos_framework = @0x1 )]
+    #[expected_failure(abort_code = ETIME_INTERVAL_NOT_ELAPSED)]
+    public entry fun cannot_collect_payment_before_time_interval(module_owner: signer, merchant: signer, aptos_framework: signer) acquires PaymentConfig, PaymentMetadata {
+        timestamp::set_time_has_started_for_testing(&aptos_framework);
+
+        let constants = get_constants();
+        let (customer_pk_bytes, customer, customer_signer_capability_offer_bytes, _delegated_resource) = create_account_and_sign_challenge(constants.subscription_name);
+
+        let merchant_addr = signer::address_of(&merchant);
+        let customer_addr = signer::address_of(&customer);
+        
+        initialize_coin_and_mint(&module_owner, &customer, constants.initial_mint_amount);
+        assert!(coin::balance<FakeCoin>(customer_addr) == constants.initial_mint_amount, EINVALID_BALANCE);
+        aptos_account::create_account(merchant_addr);
+        managed_coin::register<FakeCoin>(&merchant);
+
+        initialize_merchant_authority(&merchant);
+        assert!(exists<MerchantAuthority>(merchant_addr), EMERCHANT_AUTHORITY_NOT_CREATED);
+
+        initialize_payment_config<FakeCoin>(&merchant, merchant_addr, constants.collect_on_init, constants.amount_to_collect_on_init, constants.amount_to_collect_per_period, constants.time_interval, constants.subscription_name);
+        assert!(exists<PaymentConfig<FakeCoin>>(merchant_addr), EPAYMENT_CONFIG_NOT_CREATED);
+
+        initialize_payment_metadata<FakeCoin>(&customer, merchant_addr, constants.cycles, customer_signer_capability_offer_bytes, customer_pk_bytes);
+        assert!(exists<PaymentMetadata<FakeCoin>>(customer_addr), EPAYMENT_METADATA_NOT_CREATED);
+        assert!(coin::balance<FakeCoin>(merchant_addr) == constants.amount_to_collect_on_init, EINVALID_BALANCE);
+        timestamp::fast_forward_seconds(constants.time_interval + 2);
+        collect_payment<FakeCoin>(&merchant, customer_addr);
+        assert!(coin::balance<FakeCoin>(merchant_addr) == (constants.amount_to_collect_on_init + constants.amount_to_collect_per_period), EINVALID_BALANCE);
+        // Collecting for second cycle but collecting before the time interval so this would fail
+        collect_payment<FakeCoin>(&merchant, customer_addr);
+    }
+
+    #[test(module_owner= @Subscription, merchant= @0x5, aptos_framework = @0x1 )]
+    #[expected_failure(abort_code = ELOW_DELEGATED_AMOUNT)]
+    public entry fun cannot_collect_more_than_delegated_amount(module_owner: signer, merchant: signer, aptos_framework: signer) acquires PaymentConfig, PaymentMetadata {
+        timestamp::set_time_has_started_for_testing(&aptos_framework);
+
+        let constants = get_constants();
+        let (customer_pk_bytes, customer, customer_signer_capability_offer_bytes, _delegated_resource) = create_account_and_sign_challenge(constants.subscription_name);
+
+        let merchant_addr = signer::address_of(&merchant);
+        let customer_addr = signer::address_of(&customer);
+        
+        initialize_coin_and_mint(&module_owner, &customer, constants.initial_mint_amount);
+        assert!(coin::balance<FakeCoin>(customer_addr) == constants.initial_mint_amount, EINVALID_BALANCE);
+        aptos_account::create_account(merchant_addr);
+        managed_coin::register<FakeCoin>(&merchant);
+
+        initialize_merchant_authority(&merchant);
+        assert!(exists<MerchantAuthority>(merchant_addr), EMERCHANT_AUTHORITY_NOT_CREATED);
+
+        initialize_payment_config<FakeCoin>(&merchant, merchant_addr, constants.collect_on_init, constants.amount_to_collect_on_init, constants.amount_to_collect_per_period, constants.time_interval, constants.subscription_name);
+        assert!(exists<PaymentConfig<FakeCoin>>(merchant_addr), EPAYMENT_CONFIG_NOT_CREATED);
+
+        initialize_payment_metadata<FakeCoin>(&customer, merchant_addr, constants.cycles, customer_signer_capability_offer_bytes, customer_pk_bytes);
+        assert!(exists<PaymentMetadata<FakeCoin>>(customer_addr), EPAYMENT_METADATA_NOT_CREATED);
+        assert!(coin::balance<FakeCoin>(merchant_addr) == constants.amount_to_collect_on_init, EINVALID_BALANCE);
+        timestamp::fast_forward_seconds(constants.time_interval + 2);
+        collect_payment<FakeCoin>(&merchant, customer_addr);
+        assert!(coin::balance<FakeCoin>(merchant_addr) == (constants.amount_to_collect_on_init + constants.amount_to_collect_per_period), EINVALID_BALANCE);
+        timestamp::fast_forward_seconds(constants.time_interval + 2);
+        collect_payment<FakeCoin>(&merchant, customer_addr);
+        assert!(coin::balance<FakeCoin>(merchant_addr) == (constants.amount_to_collect_on_init + 2*constants.amount_to_collect_per_period), EINVALID_BALANCE);
+        timestamp::fast_forward_seconds(constants.time_interval + 2);
+        collect_payment<FakeCoin>(&merchant, customer_addr);
+        assert!(coin::balance<FakeCoin>(merchant_addr) == (constants.amount_to_collect_on_init + 3*constants.amount_to_collect_per_period), EINVALID_BALANCE);
+        timestamp::fast_forward_seconds(constants.time_interval + 2);
+        collect_payment<FakeCoin>(&merchant, customer_addr);
+        assert!(coin::balance<FakeCoin>(merchant_addr) == (constants.amount_to_collect_on_init + 4*constants.amount_to_collect_per_period), EINVALID_BALANCE);
+        // only 4 cycles were approved so the fifth payment would fail
+        timestamp::fast_forward_seconds(constants.time_interval + 2);
+        collect_payment<FakeCoin>(&merchant, customer_addr);
+    }
+
 
 }

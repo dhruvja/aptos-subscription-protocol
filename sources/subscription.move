@@ -22,6 +22,7 @@ module Subscription::subscription {
     const EINVALID_BALANCE: u64 = 9;
     const EPAYMENT_METADATA_NOT_CREATED: u64 = 10;
     const EPAYMENT_METADATA_IS_STILL_ACTIVE: u64 = 11;
+    const ENOT_ACTIVE: u64 = 12;
 
     struct MerchantAuthority has key {
         init_authority: address,
@@ -132,6 +133,18 @@ module Subscription::subscription {
         payment_metadata.pending_delegated_amount = payment_metadata.pending_delegated_amount - payment_config.amount_to_collect_per_period;
         payment_metadata.last_payment_collection_time = timestamp::now_seconds();
         payment_metadata.payments_collected = payment_metadata.payments_collected + payment_config.amount_to_collect_per_period;
+    }
+
+    public entry fun recharge_subscription(subscriber: &signer, merchant: address, cycles: u64) acquires PaymentConfig, PaymentMetadata {
+        let subscriber_addr = signer::address_of(subscriber);
+        let payment_config = borrow_global<PaymentConfig<CoinType>>(merchant);
+        let payment_metadata = borrow_global_mut<PaymentMetadata<CoinType>>(subscriber_addr);
+        assert!(payment_metadata.payment_config == merchant, EINVALID_MERCHANT_AUTHORITY); 
+        assert!(payment_metadata.active, ENOT_ACTIVE);
+
+        let amount_delegated = cycles * payment_config.amount_to_collect_per_period;
+        payment_metadata.amount_delegated = payment_metadata.amount_delegated + amount_delegated;
+        payment_metadata.pending_delegated_amount = payment_metadata.pending_delegated_amount + amount_delegated; 
     }
 
     public entry fun revoke_subscription<CoinType>(subscriber: &signer, merchant: address) acquires PaymentMetadata {

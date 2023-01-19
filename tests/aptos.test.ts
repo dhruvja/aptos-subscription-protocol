@@ -62,7 +62,7 @@ const amountToCollectOnInit = 1000;
 const amountToCollectPerPeriod = 500;
 const timeInterval = 2;
 const subscriptionName = "Test 1";
-const cycles = 4;
+const cycles = 2;
 
 function stringToHex(text: string) {
   const encoder = new TextEncoder();
@@ -245,7 +245,10 @@ describe("End to end Transactions", () => {
 
   it("can initialize payment metadata", async () => {
     const accountData = await client.getAccount(bob.address());
-    const recipient = AptosAccount.getResourceAccountAddress(bob.address(), Buffer.from(subscriptionName));
+    const recipient = AptosAccount.getResourceAccountAddress(
+      bob.address(),
+      Buffer.from(subscriptionName)
+    );
     const challenge = new SignerCapabilityOfferProofChallengeV2(
       TxnBuilderTypes.AccountAddress.fromHex("0x1"),
       "account",
@@ -284,10 +287,126 @@ describe("End to end Transactions", () => {
         `${moduleOwner.address()}::subscription::PaymentMetadata<0x1::aptos_coin::AptosCoin>`
       );
       const resourceData: PaymentMetadata = resource.data;
-      console.log(resourceData);
+      expect(Number(resourceData.amount_delegated)).toBe(
+        cycles * amountToCollectPerPeriod
+      );
     } catch (error) {
       console.log(error);
       throw error;
+    }
+  });
+
+  it("collect payments", async () => {
+    await sleep(2000);
+    let bobPreviousBalance = await coinClient.checkBalance(bob);
+    let args = [
+      bob.address(), // payment account
+    ];
+    let payload = {
+      arguments: args,
+      function: `${moduleOwner.address()}::subscription::collect_payment`,
+      type: "entry_function_payload",
+      type_arguments: ["0x1::aptos_coin::AptosCoin"],
+    };
+    try {
+      const transaction = await client.generateTransaction(
+        merchant.address(),
+        payload
+      );
+      const signature = await client.signTransaction(merchant, transaction);
+      const tx = await client.submitTransaction(signature);
+      await client.waitForTransaction(tx.hash, { checkSuccess: true });
+      const resource = await client.getAccountResource(
+        bob.address(),
+        `${moduleOwner.address()}::subscription::PaymentMetadata<0x1::aptos_coin::AptosCoin>`
+      );
+      const bobUpdatedBalance = await coinClient.checkBalance(bob);
+      const resourceData: PaymentMetadata = resource.data;
+      expect(Number(resourceData.pending_delegated_amount)).toBe(
+        cycles * amountToCollectPerPeriod - amountToCollectPerPeriod
+      );
+      expect(Number(bobPreviousBalance - bobUpdatedBalance)).toBe(
+        amountToCollectPerPeriod
+      );
+    } catch (error) {
+      console.log(error);
+      throw error;
+    }
+    // Second interval
+    await sleep(2000);
+    bobPreviousBalance = await coinClient.checkBalance(bob);
+    args = [
+      bob.address(), // payment account
+    ];
+    payload = {
+      arguments: args,
+      function: `${moduleOwner.address()}::subscription::collect_payment`,
+      type: "entry_function_payload",
+      type_arguments: ["0x1::aptos_coin::AptosCoin"],
+    };
+    try {
+      const transaction = await client.generateTransaction(
+        merchant.address(),
+        payload
+      );
+      const signature = await client.signTransaction(merchant, transaction);
+      const tx = await client.submitTransaction(signature);
+      await client.waitForTransaction(tx.hash, { checkSuccess: true });
+      const resource = await client.getAccountResource(
+        bob.address(),
+        `${moduleOwner.address()}::subscription::PaymentMetadata<0x1::aptos_coin::AptosCoin>`
+      );
+      const bobUpdatedBalance = await coinClient.checkBalance(bob);
+      const resourceData: PaymentMetadata = resource.data;
+      expect(Number(resourceData.pending_delegated_amount)).toBe(
+        cycles * amountToCollectPerPeriod - 2 * amountToCollectPerPeriod
+      );
+      expect(Number(bobPreviousBalance - bobUpdatedBalance)).toBe(
+        amountToCollectPerPeriod
+      );
+    } catch (error) {
+      console.log(error);
+      throw error;
+    }
+  });
+
+  it("Cannot collect payments after cycles elapsed", async () => {
+    await sleep(2000);
+    const bobPreviousBalance = await coinClient.checkBalance(bob);
+    const args = [
+      bob.address(), // payment account
+    ];
+    const payload = {
+      arguments: args,
+      function: `${moduleOwner.address()}::subscription::collect_payment`,
+      type: "entry_function_payload",
+      type_arguments: ["0x1::aptos_coin::AptosCoin"],
+    };
+    try {
+      const transaction = await client.generateTransaction(
+        merchant.address(),
+        payload
+      );
+      const signature = await client.signTransaction(merchant, transaction);
+      const tx = await client.submitTransaction(signature);
+      await client.waitForTransaction(tx.hash, { checkSuccess: true });
+      const resource = await client.getAccountResource(
+        bob.address(),
+        `${moduleOwner.address()}::subscription::PaymentMetadata<0x1::aptos_coin::AptosCoin>`
+      );
+      const bobUpdatedBalance = await coinClient.checkBalance(bob);
+      const resourceData: PaymentMetadata = resource.data;
+      expect(Number(resourceData.pending_delegated_amount)).toBe(
+        cycles * amountToCollectPerPeriod - 3 * amountToCollectPerPeriod
+      );
+      expect(Number(bobPreviousBalance - bobUpdatedBalance)).toBe(
+        amountToCollectPerPeriod
+      );
+    } catch (error: any) {
+      console.log(error);
+      expect(error.transaction.vm_status).toBe(
+        `Move abort in ${moduleOwner.address()}::subscription: ELOW_DELEGATED_AMOUNT(0x6): `
+      );
     }
   });
 });

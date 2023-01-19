@@ -26,20 +26,43 @@ const coinClient = new CoinClient(client);
 const tokenClient = new TokenClient(client);
 const initialFund = 100_000_000;
 
+type signerCapability = {
+  account: string;
+};
+
 type MerchantAuthority = {
   init_authority?: string;
   current_authority?: string;
 };
 
 type PaymentConfig = {
-  payment_account: string;
-  merchant_authority: string;
-  collect_on_init: boolean;
-  amount_to_collect_on_init: number;
-  amount_to_collect_per_period: number; // in seconds
-  time_interval: number;
-  subscription_name: string;
+  payment_account?: string;
+  merchant_authority?: string;
+  collect_on_init?: boolean;
+  amount_to_collect_on_init?: number;
+  amount_to_collect_per_period?: number; // in seconds
+  time_interval?: number;
+  subscription_name?: string;
 };
+
+type PaymentMetadata = {
+  owner?: string;
+  created_at?: number; // timestamp in seconds
+  payment_config?: string;
+  amount_delegated?: number;
+  payments_collected?: number;
+  pending_delegated_amount?: number;
+  resource_signer_cap?: signerCapability;
+  last_payment_collection_time?: number; // timestamp in seconds
+  active?: boolean;
+};
+
+const collectOnInit = true;
+const amountToCollectOnInit = 1000;
+const amountToCollectPerPeriod = 500;
+const timeInterval = 2;
+const subscriptionName = "Test 1";
+const cycles = 4;
 
 function stringToHex(text: string) {
   const encoder = new TextEncoder();
@@ -66,6 +89,25 @@ function fetchResourceAccount(initiator: HexString, receiver: HexString) {
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+class SignerCapabilityOfferProofChallengeV2 {
+  constructor(
+    public readonly accountAddress: TxnBuilderTypes.AccountAddress,
+    public readonly moduleName: string,
+    public readonly structName: string,
+    public readonly sequenceNumber: number | bigint,
+    public readonly sourceAddress: TxnBuilderTypes.AccountAddress,
+    public readonly recipientAddress: TxnBuilderTypes.AccountAddress
+  ) {}
+  serialize(serializer: BCS.Serializer) {
+    this.accountAddress.serialize(serializer);
+    serializer.serializeStr(this.moduleName);
+    serializer.serializeStr(this.structName);
+    serializer.serializeU64(this.sequenceNumber);
+    this.sourceAddress.serialize(serializer);
+    this.recipientAddress.serialize(serializer);
+  }
 }
 
 describe("set up account, mint tokens and publish module", () => {
@@ -155,6 +197,94 @@ describe("End to end Transactions", () => {
       expect(resourceData.current_authority).toBe(
         merchant.address().toShortString()
       );
+    } catch (error) {
+      console.log(error);
+      throw error;
+    }
+  });
+
+  it("can initialize payment config", async () => {
+    const args = [
+      merchant.address(), // payment account
+      collectOnInit,
+      amountToCollectOnInit,
+      amountToCollectPerPeriod,
+      timeInterval,
+      subscriptionName,
+    ];
+    const payload = {
+      arguments: args,
+      function: `${moduleOwner.address()}::subscription::initialize_payment_config`,
+      type: "entry_function_payload",
+      type_arguments: ["0x1::aptos_coin::AptosCoin"],
+    };
+    try {
+      const transaction = await client.generateTransaction(
+        merchant.address(),
+        payload
+      );
+      const signature = await client.signTransaction(merchant, transaction);
+      const tx = await client.submitTransaction(signature);
+      await client.waitForTransaction(tx.hash, { checkSuccess: true });
+      const resource = await client.getAccountResource(
+        merchant.address(),
+        `${moduleOwner.address()}::subscription::PaymentConfig<0x1::aptos_coin::AptosCoin>`
+      );
+      const resourceData: PaymentConfig = resource.data;
+      expect(resourceData.payment_account).toBe(
+        merchant.address().toShortString()
+      );
+      expect(resourceData.merchant_authority).toBe(
+        merchant.address().toShortString()
+      );
+    } catch (error) {
+      console.log(error);
+      throw error;
+    }
+  });
+
+  it("can initialize payment metadata", async () => {
+    const accountData = await client.getAccount(bob.address());
+    const recipient = AptosAccount.getResourceAccountAddress(bob.address(), Buffer.from(subscriptionName));
+    const challenge = new SignerCapabilityOfferProofChallengeV2(
+      TxnBuilderTypes.AccountAddress.fromHex("0x1"),
+      "account",
+      "SignerCapabilityOfferProofChallengeV2",
+      BigInt(accountData.sequence_number),
+      TxnBuilderTypes.AccountAddress.fromHex(bob.address()),
+      TxnBuilderTypes.AccountAddress.fromHex(recipient)
+    );
+
+    const challengeHex = HexString.fromUint8Array(BCS.bcsToBytes(challenge));
+
+    const proofSignedByCurrentPrivateKey = bob.signHexString(challengeHex);
+
+    const args = [
+      merchant.address(), // merchant address
+      cycles,
+      proofSignedByCurrentPrivateKey.toUint8Array(),
+      bob.pubKey().toUint8Array(),
+    ];
+    const payload = {
+      arguments: args,
+      function: `${moduleOwner.address()}::subscription::initialize_payment_metadata`,
+      type: "entry_function_payload",
+      type_arguments: ["0x1::aptos_coin::AptosCoin"],
+    };
+    try {
+      const transaction = await client.generateTransaction(
+        bob.address(),
+        payload
+      );
+      const signature = await client.signTransaction(bob, transaction);
+      const tx = await client.submitTransaction(signature);
+      await client.waitForTransaction(tx.hash, { checkSuccess: true });
+      const resource = await client.getAccountResource(
+        bob.address(),
+        `${moduleOwner.address()}::subscription::PaymentMetadata<0x1::aptos_coin::AptosCoin>`
+      );
+      const resourceData: PaymentMetadata = resource.data;
+      console.log(resourceData);
     } catch (error) {
       console.log(error);
       throw error;
